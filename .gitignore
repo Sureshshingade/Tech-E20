@@ -1,0 +1,57 @@
+# Environment and secrets
+.env
+.env.*
+!.env.example
+!**/.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+
+# Python
+venv/
+.venv/
+**/venv/
+**/.venv/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+**/.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Node and frontend builds
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+dist-ssr/
+*.tsbuildinfo
+
+# Logs and local runtime files
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# Local databases, exports, and backups
+backups/
+*.sql.gz
+*.dump
+*.backup
+*.bak
+*.sqlite
+*.sqlite3
+*.db
+
+# Editors and operating system files
+.idea/
+.vscode/*
+!.vscode/extensions.json
+.DS_Store
+Thumbs.db
