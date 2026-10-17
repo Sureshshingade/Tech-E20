@@ -247,4 +247,4 @@ The following items are intentionally incomplete in this release:
 
 ## Author
 
-Developed by [Sureshshingade](https://github.com/Sureshshingade) as a BCA final-year project and software developer portfolio project.
+Developed by [Sureshshingade](https://github.com/Sureshshingade) as a Bachelor of Computer Application final-year project and software developer portfolio project.
