@@ -13,6 +13,7 @@ The application is under active development. This release documents the function
 - Station name setting shown below the Tech-E20 product name.
 - Authenticated fuel inventory view; only the Owner can create or directly edit fuel records.
 - Tanker delivery workflow for Owners and Managers, with stock-before/stock-after values, supplier/challan details, inventory transactions, and audit entries.
+- Owner-managed city reference rates for Petrol and Diesel; they support local price display and never change saved station inventory prices.
 - Attendance screen for Owners and Managers: select current or earlier dates, assign Present/Absent/Leave, and correct recorded attendance.
 - Morning and Afternoon/Evening default pump-shift assignment for Managers and Employees.
 - Audit records for key authentication, account, station-name, tanker-delivery, and attendance changes.
@@ -109,6 +110,8 @@ notepad .env
 
 Set valid local MySQL credentials and a unique `JWT_SECRET` of at least 32 characters. The `INITIAL_OWNER_*` values are used only when creating the first Owner account.
 
+The Owner can set the station city and manually record local Petrol and Diesel reference rates in Settings. These reference rates are informational only and never overwrite saved inventory prices or historical records.
+
 Never commit `backend/.env`, real credentials, JWT secrets, or initial passwords.
 
 ### 3. Database setup and migrations
@@ -122,6 +125,8 @@ Get-Content .\migrations\001_auth_foundation.sql | mysql -u root -p fuel_station
 Get-Content .\migrations\002_tech_e20_operations.sql | mysql -u root -p fuel_station_db
 Get-Content .\migrations\003_tanker_deliveries.sql | mysql -u root -p fuel_station_db
 Get-Content .\migrations\004_station_settings.sql | mysql -u root -p fuel_station_db
+Get-Content .\migrations\005_station_city.sql | mysql -u root -p fuel_station_db
+Get-Content .\migrations\006_manual_city_rates.sql | mysql -u root -p fuel_station_db
 ```
 
 For a fresh local demonstration database, create the database and the foundational `fuels` table first:

@@ -17,7 +17,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
     allow_credentials=False,
-    allow_methods=["GET", "POST", "PUT"],
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["Authorization", "Content-Type"],
 )
 
@@ -136,6 +136,9 @@ class ManagedUserUpdate(BaseModel):
 
 class StationSettingsInput(BaseModel):
     station_name: str = Field(min_length=2, max_length=120)
+    city: str = Field(min_length=2, max_length=100)
+    city_petrol_rate: Decimal | None = Field(default=None, ge=0, max_digits=10, decimal_places=2)
+    city_diesel_rate: Decimal | None = Field(default=None, ge=0, max_digits=10, decimal_places=2)
 
     @field_validator("station_name")
     @classmethod
@@ -143,6 +146,14 @@ class StationSettingsInput(BaseModel):
         value = value.strip()
         if not value:
             raise ValueError("Petrol pump name cannot be blank.")
+        return value
+
+    @field_validator("city")
+    @classmethod
+    def clean_city(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("City cannot be blank.")
         return value
 
 
@@ -172,6 +183,23 @@ class AttendanceInput(BaseModel):
     @classmethod
     def clean_reason(cls, value: str | None) -> str | None:
         return value.strip() if value and value.strip() else None
+
+
+class DispenserInput(BaseModel):
+    identifier: str = Field(min_length=1, max_length=40)
+
+    @field_validator("identifier")
+    @classmethod
+    def clean_identifier(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Dispenser identifier cannot be blank.")
+        return value
+
+
+class NozzleInput(DispenserInput):
+    dispenser_id: int = Field(gt=0)
+    fuel_id: int = Field(gt=0)
 
 
 def public_user(user: dict) -> dict:
@@ -364,9 +392,9 @@ def get_station_settings(current_user: dict = Depends(get_current_user)):
     connection = get_db_connection()
     try:
         cursor = connection.cursor(dictionary=True)
-        cursor.execute("SELECT station_name, updated_at FROM station_settings WHERE id = 1")
+        cursor.execute("SELECT station_name, city, city_petrol_rate, city_diesel_rate, city_rate_updated_at, updated_at FROM station_settings WHERE id = 1")
         settings = cursor.fetchone()
-        return settings or {"station_name": "My Petrol Pump", "updated_at": None}
+        return settings or {"station_name": "My Petrol Pump", "city": "Mumbai", "city_petrol_rate": None, "city_diesel_rate": None, "city_rate_updated_at": None, "updated_at": None}
     finally:
         cursor.close()
         connection.close()
@@ -377,18 +405,23 @@ def update_station_settings(settings: StationSettingsInput, current_user: dict =
     connection = get_db_connection()
     try:
         cursor = connection.cursor(dictionary=True)
-        cursor.execute("SELECT station_name FROM station_settings WHERE id = 1 FOR UPDATE")
-        existing = cursor.fetchone() or {"station_name": "My Petrol Pump"}
-        cursor.execute("INSERT INTO station_settings (id, station_name, updated_by) VALUES (1, %s, %s) ON DUPLICATE KEY UPDATE station_name = VALUES(station_name), updated_by = VALUES(updated_by)", (settings.station_name, current_user["id"]))
-        write_audit_log(cursor, current_user["id"], "STATION_NAME_UPDATED", "station_settings", 1, json.dumps({"before": existing["station_name"], "after": settings.station_name}))
+        cursor.execute("SELECT station_name, city, city_petrol_rate, city_diesel_rate FROM station_settings WHERE id = 1 FOR UPDATE")
+        existing = cursor.fetchone() or {"station_name": "My Petrol Pump", "city": "Mumbai", "city_petrol_rate": None, "city_diesel_rate": None}
+        cursor.execute("""INSERT INTO station_settings (id, station_name, city, city_petrol_rate, city_diesel_rate, city_rate_updated_at, updated_by)
+            VALUES (1, %s, %s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE station_name = VALUES(station_name), city = VALUES(city), city_petrol_rate = VALUES(city_petrol_rate), city_diesel_rate = VALUES(city_diesel_rate), city_rate_updated_at = VALUES(city_rate_updated_at), updated_by = VALUES(updated_by)""", (settings.station_name, settings.city, settings.city_petrol_rate, settings.city_diesel_rate, datetime.now(), current_user["id"]))
+        after = {"station_name": settings.station_name, "city": settings.city, "city_petrol_rate": settings.city_petrol_rate, "city_diesel_rate": settings.city_diesel_rate}
+        write_audit_log(cursor, current_user["id"], "STATION_SETTINGS_UPDATED", "station_settings", 1, json.dumps({"before": existing, "after": after}, default=str))
         connection.commit()
-        return {"station_name": settings.station_name}
+        return {**after, "city_rate_updated_at": datetime.now()}
     except Exception:
         connection.rollback()
         raise
     finally:
         cursor.close()
         connection.close()
+
+
 
 
 @app.get("/api/attendance")
@@ -457,6 +490,32 @@ def save_attendance(attendance: AttendanceInput, current_user: dict = Depends(re
         connection.close()
 
 
+@app.get("/api/reports/operations")
+def get_operations_report(report_date: date, current_user: dict = Depends(require_roles(Role.OWNER, Role.MANAGER))):
+    """Database-backed daily inventory, delivery, and attendance report."""
+    connection = get_db_connection()
+    try:
+        cursor = connection.cursor(dictionary=True)
+        cursor.execute("SELECT id, name, price, stock_litres FROM fuels ORDER BY name, id")
+        fuels = cursor.fetchall()
+        cursor.execute("""SELECT d.id, f.name AS fuel_name, d.quantity_litres, d.stock_before_litres, d.stock_after_litres,
+                          d.supplier_name, d.challan_number, d.received_at, u.full_name AS recorded_by
+                          FROM tanker_deliveries d JOIN fuels f ON f.id=d.fuel_id JOIN users u ON u.id=d.created_by
+                          WHERE DATE(d.received_at)=%s ORDER BY d.received_at DESC""", (report_date,))
+        deliveries = cursor.fetchall()
+        cursor.execute("""SELECT a.status, COUNT(*) AS total FROM attendance a
+                          WHERE a.attendance_date=%s GROUP BY a.status""", (report_date,))
+        attendance_summary = {row["status"]: row["total"] for row in cursor.fetchall()}
+        cursor.execute("""SELECT u.full_name, p.default_shift, a.status FROM attendance a JOIN users u ON u.id=a.user_id
+                          LEFT JOIN employee_profiles p ON p.user_id=u.id WHERE a.attendance_date=%s ORDER BY u.full_name""", (report_date,))
+        attendance = cursor.fetchall()
+        return {"report_date": report_date, "fuels": fuels, "deliveries": deliveries,
+                "attendance_summary": attendance_summary, "attendance": attendance}
+    finally:
+        cursor.close()
+        connection.close()
+
+
 @app.get("/api/fuels")
 def get_fuels(current_user: dict = Depends(get_current_user)):
     connection = get_db_connection()
@@ -511,6 +570,101 @@ def update_fuel(fuel_id: int, fuel: FuelInput, current_user: dict = Depends(requ
         if isinstance(error, HTTPException):
             raise
         raise HTTPException(status_code=500, detail="Could not update fuel record") from error
+    finally:
+        cursor.close()
+        connection.close()
+
+
+@app.delete("/api/fuels/{fuel_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_fuel(fuel_id: int, current_user: dict = Depends(require_roles(Role.OWNER))):
+    """Delete an unused fuel setup record; historic operational records must remain intact."""
+    connection = get_db_connection()
+    try:
+        cursor = connection.cursor(dictionary=True)
+        cursor.execute("SELECT id, name, price, stock_litres FROM fuels WHERE id = %s FOR UPDATE", (fuel_id,))
+        fuel = cursor.fetchone()
+        if not fuel:
+            raise HTTPException(status_code=404, detail="Fuel record not found.")
+        references = (("tanks", "fuel_id"), ("nozzles", "fuel_id"), ("inventory_transactions", "fuel_id"), ("tanker_deliveries", "fuel_id"))
+        for table, column in references:
+            cursor.execute(f"SELECT 1 FROM {table} WHERE {column} = %s LIMIT 1", (fuel_id,))
+            if cursor.fetchone():
+                raise HTTPException(status_code=409, detail="This fuel record has operational history and cannot be deleted. Keep it for audit purposes.")
+        write_audit_log(cursor, current_user["id"], "FUEL_DELETED", "fuel", fuel_id, json.dumps({"deleted": fuel}, default=str))
+        cursor.execute("DELETE FROM fuels WHERE id = %s", (fuel_id,))
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        cursor.close()
+        connection.close()
+
+
+@app.get("/api/dispensers")
+def get_dispensers(current_user: dict = Depends(require_roles(Role.OWNER, Role.MANAGER))):
+    connection = get_db_connection()
+    try:
+        cursor = connection.cursor(dictionary=True)
+        cursor.execute("SELECT id, identifier, is_active FROM dispensers ORDER BY identifier")
+        return cursor.fetchall()
+    finally:
+        cursor.close()
+        connection.close()
+
+
+@app.post("/api/dispensers", status_code=status.HTTP_201_CREATED)
+def create_dispenser(dispenser: DispenserInput, current_user: dict = Depends(require_roles(Role.OWNER))):
+    connection = get_db_connection()
+    try:
+        cursor = connection.cursor()
+        cursor.execute("INSERT INTO dispensers (identifier) VALUES (%s)", (dispenser.identifier,))
+        dispenser_id = cursor.lastrowid
+        write_audit_log(cursor, current_user["id"], "DISPENSER_CREATED", "dispenser", dispenser_id, dispenser.identifier)
+        connection.commit()
+        return {"id": dispenser_id, "identifier": dispenser.identifier}
+    except mysql.connector.IntegrityError as error:
+        connection.rollback()
+        raise HTTPException(status_code=409, detail="That dispenser identifier already exists.") from error
+    finally:
+        cursor.close()
+        connection.close()
+
+
+@app.get("/api/nozzles")
+def get_nozzles(current_user: dict = Depends(require_roles(Role.OWNER, Role.MANAGER))):
+    connection = get_db_connection()
+    try:
+        cursor = connection.cursor(dictionary=True)
+        cursor.execute("""SELECT n.id, n.identifier, n.dispenser_id, d.identifier AS dispenser_identifier,
+                          n.fuel_id, f.name AS fuel_name, n.is_active
+                          FROM nozzles n JOIN dispensers d ON d.id = n.dispenser_id
+                          JOIN fuels f ON f.id = n.fuel_id ORDER BY d.identifier, n.identifier""")
+        return cursor.fetchall()
+    finally:
+        cursor.close()
+        connection.close()
+
+
+@app.post("/api/nozzles", status_code=status.HTTP_201_CREATED)
+def create_nozzle(nozzle: NozzleInput, current_user: dict = Depends(require_roles(Role.OWNER))):
+    connection = get_db_connection()
+    try:
+        cursor = connection.cursor(dictionary=True)
+        cursor.execute("SELECT id FROM dispensers WHERE id = %s AND is_active = TRUE", (nozzle.dispenser_id,))
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail="Active dispenser not found.")
+        cursor.execute("SELECT id FROM fuels WHERE id = %s", (nozzle.fuel_id,))
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail="Fuel record not found.")
+        cursor.execute("INSERT INTO nozzles (identifier, dispenser_id, fuel_id) VALUES (%s, %s, %s)", (nozzle.identifier, nozzle.dispenser_id, nozzle.fuel_id))
+        nozzle_id = cursor.lastrowid
+        write_audit_log(cursor, current_user["id"], "NOZZLE_CREATED", "nozzle", nozzle_id, nozzle.identifier)
+        connection.commit()
+        return {"id": nozzle_id, "identifier": nozzle.identifier}
+    except mysql.connector.IntegrityError as error:
+        connection.rollback()
+        raise HTTPException(status_code=409, detail="That nozzle identifier already exists.") from error
     finally:
         cursor.close()
         connection.close()
