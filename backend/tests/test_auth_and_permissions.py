@@ -82,6 +82,16 @@ def test_ai_chat_rejects_overlong_or_blank_messages():
     assert response.status_code == 422
 
 
+def test_cloud_ai_requires_an_explicit_hosted_endpoint(monkeypatch):
+    monkeypatch.setenv("TECH_E20_ENV", "cloud")
+    monkeypatch.delenv("OLLAMA_API_URL", raising=False)
+
+    response = client_for(Role.OWNER).post("/api/ai/chat", json={"message": "How should I check a tanker delivery?"})
+
+    assert response.status_code == 503
+    assert "unavailable in this deployment" in response.json()["detail"]
+
+
 def test_attendance_question_dates_are_unambiguous_and_year_is_required():
     assert main.parse_attendance_question_date("attendance for 13/10/2026") == (__import__("datetime").date(2026, 10, 13), None)
     assert main.parse_attendance_question_date("attendance for 2026-10-13") == (__import__("datetime").date(2026, 10, 13), None)

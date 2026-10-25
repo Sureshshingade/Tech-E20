@@ -185,6 +185,33 @@ npm run dev
 
 The frontend defaults to `http://127.0.0.1:8000/api`. To target a different API base URL, create a local `frontend/.env` file containing `VITE_API_URL=<your-api-url>`; do not commit it.
 
+## Vercel services deployment preparation
+
+The repository includes a root `vercel.json` with two public services: the Vite frontend at `/` and the FastAPI backend at `/api/*`. The API rewrite is deliberately listed before the frontend catch-all, so API requests are never handled by the React fallback. No service binding is configured because the browser calls the same-origin public `/api` URL directly.
+
+Do not deploy until the production infrastructure is ready. In Vercel Project Settings, create the following backend environment variables for **Preview** and **Production** as appropriate; do not commit their real values:
+
+```text
+TECH_E20_ENV=cloud
+DATABASE_HOST=<production MySQL hostname>
+DATABASE_PORT=<production MySQL port>
+DATABASE_NAME=<production database name>
+DATABASE_USER=<production database username>
+DATABASE_PASSWORD=<production database password>
+JWT_SECRET=<unique production secret, at least 32 characters>
+JWT_EXPIRE_MINUTES=480
+```
+
+`TECH_E20_ENV=cloud` makes the backend require explicit database host and database name values rather than falling back to local defaults. Leave `OLLAMA_API_URL` unset in cloud environments to disable AI assistance safely. If a secure hosted Ollama-compatible endpoint is later available, configure its URL as `OLLAMA_API_URL` in Vercel instead. Never point it at a personal local Ollama instance.
+
+For a combined local services check after installing the Vercel CLI and linking the project, run:
+
+```powershell
+vercel dev
+```
+
+The local application can continue using its existing backend and frontend commands; its default API URL remains `http://127.0.0.1:8000/api`.
+
 ## Accessing the application
 
 - Application: [http://localhost:5173](http://localhost:5173)

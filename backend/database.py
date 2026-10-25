@@ -4,7 +4,7 @@ import os
 
 import mysql.connector
 
-from config import required_setting
+from config import is_cloud_deployment, required_setting
 
 
 def get_db_connection():
@@ -14,10 +14,12 @@ def get_db_connection():
     except ValueError as error:
         raise RuntimeError("DATABASE_PORT in backend/.env must be a valid number.") from error
 
+    host = required_setting("DATABASE_HOST") if is_cloud_deployment() else os.environ.get("DATABASE_HOST", "127.0.0.1")
+    database_name = required_setting("DATABASE_NAME") if is_cloud_deployment() else os.environ.get("DATABASE_NAME", "fuel_station_db")
     return mysql.connector.connect(
-        host=os.environ.get("DATABASE_HOST", "127.0.0.1"),
+        host=host,
         port=port,
         user=required_setting("DATABASE_USER"),
         password=required_setting("DATABASE_PASSWORD"),
-        database=os.environ.get("DATABASE_NAME", "fuel_station_db"),
+        database=database_name,
     )

@@ -22,4 +22,9 @@ def required_setting(name: str) -> str:
     return value
 
 
+def is_cloud_deployment() -> bool:
+    """Return whether this process is intentionally configured for a cloud deployment."""
+    return os.environ.get("TECH_E20_ENV", "").strip().lower() in {"cloud", "production", "preview"}
+
+
 load_environment()

@@ -11,6 +11,7 @@ import mysql.connector
 from pydantic import BaseModel, Field, field_validator
 
 from auth import Role, get_current_user, require_roles, write_audit_log
+from config import is_cloud_deployment
 from database import get_db_connection
 from security import create_access_token, decode_access_token, hash_password, verify_password
 
@@ -316,7 +317,14 @@ async def chat_with_ollama(chat: AiChatInput, attendance_lookup: dict | None = N
         messages.append({"role": "system", "content": f"APPROVED ATTENDANCE LOOKUP (use only this data):\n{json.dumps(attendance_lookup)}"})
     messages.extend(item.model_dump() for item in chat.history)
     messages.append({"role": "user", "content": chat.message})
-    ollama_url = os.environ.get("OLLAMA_API_URL", "http://localhost:11434").rstrip("/")
+    ollama_url = os.environ.get("OLLAMA_API_URL", "").strip().rstrip("/")
+    if not ollama_url:
+        if is_cloud_deployment():
+            raise HTTPException(
+                status_code=503,
+                detail="AI assistance is unavailable in this deployment. Local AI is available when running Tech-E20 on the configured local environment.",
+            )
+        ollama_url = "http://localhost:11434"
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=5.0)) as client:
             response = await client.post(

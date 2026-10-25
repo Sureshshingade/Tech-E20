@@ -29,6 +29,20 @@ def test_missing_database_setting_has_a_clear_error(monkeypatch):
         database.get_db_connection()
 
 
+def test_cloud_mode_requires_explicit_database_host_and_name(monkeypatch):
+    monkeypatch.setenv("TECH_E20_ENV", "cloud")
+    monkeypatch.delenv("DATABASE_HOST", raising=False)
+    monkeypatch.setenv("DATABASE_NAME", "production_station")
+
+    with pytest.raises(RuntimeError, match="DATABASE_HOST must be set"):
+        database.get_db_connection()
+
+    monkeypatch.setenv("DATABASE_HOST", "mysql.example.test")
+    monkeypatch.delenv("DATABASE_NAME", raising=False)
+    with pytest.raises(RuntimeError, match="DATABASE_NAME must be set"):
+        database.get_db_connection()
+
+
 def test_jwt_secret_requires_a_non_placeholder_value_of_at_least_32_characters(monkeypatch):
     monkeypatch.setenv("JWT_SECRET", "replace_with_a_long_random_secret_at_least_32_characters")
 
