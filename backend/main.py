@@ -310,13 +310,54 @@ def read_attendance_lookup(attendance_date: date) -> dict:
     }
 
 
-async def chat_with_ollama(chat: AiChatInput, attendance_lookup: dict | None = None) -> str:
-    """Send only user-provided chat text to the local Ollama service."""
+def build_ai_messages(chat: AiChatInput, attendance_lookup: dict | None = None) -> list[dict[str, str]]:
+    """Build the limited, read-only context shared by every AI provider."""
     messages = [{"role": "system", "content": AI_SYSTEM_PROMPT}]
     if attendance_lookup:
         messages.append({"role": "system", "content": f"APPROVED ATTENDANCE LOOKUP (use only this data):\n{json.dumps(attendance_lookup)}"})
     messages.extend(item.model_dump() for item in chat.history)
     messages.append({"role": "user", "content": chat.message})
+    return messages
+
+
+async def chat_with_groq(messages: list[dict[str, str]], api_key: str) -> str:
+    """Send read-only assistant context to Groq's OpenAI-compatible endpoint."""
+    model = os.environ.get("GROQ_MODEL", "openai/gpt-oss-20b").strip() or "openai/gpt-oss-20b"
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=5.0)) as client:
+            response = await client.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}"},
+                json={"model": model, "messages": messages},
+            )
+            response.raise_for_status()
+    except httpx.TimeoutException as error:
+        raise HTTPException(status_code=504, detail="The AI service took too long to respond. Please try again.") from error
+    except httpx.RequestError as error:
+        raise HTTPException(status_code=503, detail="The AI service is temporarily unavailable. Please try again later.") from error
+    except httpx.HTTPStatusError as error:
+        if error.response.status_code == status.HTTP_429_TOO_MANY_REQUESTS:
+            detail = "The AI service is busy. Please try again shortly."
+        else:
+            detail = "The AI service could not complete the request. Please try again later."
+        raise HTTPException(status_code=503, detail=detail) from error
+
+    try:
+        content = response.json()["choices"][0]["message"]["content"].strip()
+    except (KeyError, IndexError, TypeError, ValueError, AttributeError) as error:
+        raise HTTPException(status_code=502, detail="The AI service returned an invalid response.") from error
+    if not content:
+        raise HTTPException(status_code=502, detail="The AI service returned an empty response.")
+    return content
+
+
+async def chat_with_ollama(chat: AiChatInput, attendance_lookup: dict | None = None) -> str:
+    """Use configured Groq in production, otherwise retain local Ollama support."""
+    messages = build_ai_messages(chat, attendance_lookup)
+    groq_api_key = os.environ.get("GROQ_API_KEY", "").strip()
+    if groq_api_key:
+        return await chat_with_groq(messages, groq_api_key)
+
     ollama_url = os.environ.get("OLLAMA_API_URL", "").strip().rstrip("/")
     if not ollama_url:
         if is_cloud_deployment():

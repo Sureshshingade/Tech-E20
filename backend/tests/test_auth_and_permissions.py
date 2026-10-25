@@ -1,6 +1,8 @@
+import asyncio
 from unittest.mock import Mock
 
 from fastapi.testclient import TestClient
+import httpx
 
 import main
 from auth import Role, get_current_user
@@ -85,11 +87,93 @@ def test_ai_chat_rejects_overlong_or_blank_messages():
 def test_cloud_ai_requires_an_explicit_hosted_endpoint(monkeypatch):
     monkeypatch.setenv("TECH_E20_ENV", "cloud")
     monkeypatch.delenv("OLLAMA_API_URL", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
 
     response = client_for(Role.OWNER).post("/api/ai/chat", json={"message": "How should I check a tanker delivery?"})
 
     assert response.status_code == 503
     assert "unavailable in this deployment" in response.json()["detail"]
+
+
+def test_groq_is_preferred_when_its_api_key_is_configured(monkeypatch):
+    captured = {}
+
+    async def fake_groq(messages, api_key):
+        captured["messages"] = messages
+        captured["api_key"] = api_key
+        return "Groq guidance"
+
+    monkeypatch.setenv("GROQ_API_KEY", "test-groq-key")
+    monkeypatch.setenv("OLLAMA_API_URL", "http://example.test/ollama")
+    monkeypatch.setattr(main, "chat_with_groq", fake_groq)
+
+    result = asyncio.run(main.chat_with_ollama(main.AiChatInput(message="How should I check a tanker delivery?")))
+
+    assert result == "Groq guidance"
+    assert captured["api_key"] == "test-groq-key"
+    assert captured["messages"][-1] == {"role": "user", "content": "How should I check a tanker delivery?"}
+
+
+def test_groq_success_uses_configured_model_and_openai_compatible_response(monkeypatch):
+    calls = []
+
+    class FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"choices": [{"message": {"content": "  Check seals before unloading.  "}}]}
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def post(self, url, headers, json):
+            calls.append((url, headers, json))
+            return FakeResponse()
+
+    monkeypatch.setenv("GROQ_MODEL", "openai/gpt-oss-20b")
+    monkeypatch.setattr(main.httpx, "AsyncClient", lambda **kwargs: FakeClient())
+
+    result = asyncio.run(main.chat_with_groq([{"role": "user", "content": "Help"}], "test-groq-key"))
+
+    assert result == "Check seals before unloading."
+    assert calls == [(
+        "https://api.groq.com/openai/v1/chat/completions",
+        {"Authorization": "Bearer test-groq-key"},
+        {"model": "openai/gpt-oss-20b", "messages": [{"role": "user", "content": "Help"}]},
+    )]
+
+
+def test_groq_provider_errors_return_safe_messages(monkeypatch):
+    class FakeResponse:
+        def raise_for_status(self):
+            raise httpx.HTTPStatusError(
+                "rate limited by provider", request=httpx.Request("POST", "https://example.test"), response=httpx.Response(429)
+            )
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def post(self, *args, **kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(main.httpx, "AsyncClient", lambda **kwargs: FakeClient())
+
+    try:
+        asyncio.run(main.chat_with_groq([{"role": "user", "content": "Help"}], "test-groq-key"))
+        assert False, "Expected a safe HTTPException"
+    except main.HTTPException as error:
+        assert error.status_code == 503
+        assert error.detail == "The AI service is busy. Please try again shortly."
+        assert "provider" not in error.detail.lower()
 
 
 def test_attendance_question_dates_are_unambiguous_and_year_is_required():

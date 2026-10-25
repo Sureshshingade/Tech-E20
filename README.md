@@ -118,7 +118,7 @@ ollama pull qwen2.5:3b
 ollama serve
 ```
 
-The backend uses `http://localhost:11434` by default. Set `OLLAMA_API_URL` in `backend/.env` only when Ollama is running at another local address.
+The backend uses `http://localhost:11434` by default. Set `OLLAMA_API_URL` in `backend/.env` only when Ollama is running at another local address. If `GROQ_API_KEY` is configured, the backend instead uses Groq with `GROQ_MODEL` (default: `openai/gpt-oss-20b`).
 
 The Owner can set the station city and manually record local Petrol and Diesel reference rates in Settings. These reference rates are informational only and never overwrite saved inventory prices or historical records.
 
@@ -200,9 +200,11 @@ DATABASE_USER=<production database username>
 DATABASE_PASSWORD=<production database password>
 JWT_SECRET=<unique production secret, at least 32 characters>
 JWT_EXPIRE_MINUTES=480
+GROQ_API_KEY=<Groq API key>
+GROQ_MODEL=openai/gpt-oss-20b
 ```
 
-`TECH_E20_ENV=cloud` makes the backend require explicit database host and database name values rather than falling back to local defaults. Leave `OLLAMA_API_URL` unset in cloud environments to disable AI assistance safely. If a secure hosted Ollama-compatible endpoint is later available, configure its URL as `OLLAMA_API_URL` in Vercel instead. Never point it at a personal local Ollama instance.
+`TECH_E20_ENV=cloud` makes the backend require explicit database host and database name values rather than falling back to local defaults. Configure `GROQ_API_KEY` for the deployed AI Assistant; the backend calls Groq directly from FastAPI, so the key never reaches the browser. Without it, cloud mode retains the safe unavailable response unless a secure hosted Ollama-compatible `OLLAMA_API_URL` is configured. Never point it at a personal local Ollama instance.
 
 For a combined local services check after installing the Vercel CLI and linking the project, run:
 
