@@ -60,6 +60,102 @@ def test_unauthenticated_fuel_request_is_rejected():
     assert response.status_code == 401
 
 
+def test_unauthenticated_ai_chat_is_rejected():
+    response = client_for().post("/api/ai/chat", json={"message": "How should I check a tanker delivery?"})
+    assert response.status_code == 401
+
+
+def test_all_active_roles_can_use_ai_chat(monkeypatch):
+    async def fake_chat(chat, attendance_lookup=None):
+        assert chat.message == "How should I check a tanker delivery?"
+        return "Check the delivery documents and recorded stock."
+
+    monkeypatch.setattr(main, "chat_with_ollama", fake_chat)
+    for role in Role:
+        response = client_for(role).post("/api/ai/chat", json={"message": "How should I check a tanker delivery?"})
+        assert response.status_code == 200
+        assert response.json()["message"] == "Check the delivery documents and recorded stock."
+
+
+def test_ai_chat_rejects_overlong_or_blank_messages():
+    response = client_for(Role.EMPLOYEE).post("/api/ai/chat", json={"message": "   "})
+    assert response.status_code == 422
+
+
+def test_attendance_question_dates_are_unambiguous_and_year_is_required():
+    assert main.parse_attendance_question_date("attendance for 13/10/2026") == (__import__("datetime").date(2026, 10, 13), None)
+    assert main.parse_attendance_question_date("attendance for 2026-10-13") == (__import__("datetime").date(2026, 10, 13), None)
+    assert main.parse_attendance_question_date("attendance for yesterday", __import__("datetime").date(2026, 10, 14)) == (__import__("datetime").date(2026, 10, 13), None)
+    parsed_date, error = main.parse_attendance_question_date("attendance for 13/10")
+    assert parsed_date is None
+    assert "include the year" in error
+
+
+def test_attendance_lookup_returns_correct_counts_and_uses_bound_date_parameter(monkeypatch):
+    rows = [
+        {"full_name": "Present Person", "default_shift": "Morning", "attendance_status": "PRESENT"},
+        {"full_name": "Absent Person", "default_shift": "Morning", "attendance_status": "ABSENT"},
+        {"full_name": "Leave Person", "default_shift": "Evening", "attendance_status": "LEAVE"},
+        {"full_name": "Unmarked Person", "default_shift": "Evening", "attendance_status": "NOT_MARKED"},
+    ]
+
+    class CapturingCursor(FakeCursor):
+        def __init__(self):
+            super().__init__(rows=rows)
+            self.calls = []
+
+        def execute(self, statement, params=()):
+            self.calls.append((statement, params))
+
+    cursor = CapturingCursor()
+    monkeypatch.setattr(main, "get_db_connection", lambda: FakeConnection(cursor))
+    response = client_for(Role.MANAGER).get("/api/ai/attendance?attendance_date=2026-10-13")
+
+    assert response.status_code == 200
+    assert response.json()["counts"] == {"PRESENT": 1, "ABSENT": 1, "LEAVE": 1, "NOT_MARKED": 1}
+    assert response.json()["total_active_staff"] == 4
+    statement, params = cursor.calls[0]
+    assert "a.attendance_date = %s" in statement
+    assert params == (__import__("datetime").date(2026, 10, 13),)
+
+
+def test_attendance_lookup_handles_no_active_staff(monkeypatch):
+    monkeypatch.setattr(main, "get_db_connection", lambda: FakeConnection(FakeCursor(rows=[])))
+    response = client_for(Role.OWNER).get("/api/ai/attendance?attendance_date=2026-10-13")
+
+    assert response.status_code == 200
+    assert response.json()["records"] == []
+    assert response.json()["counts"] == {"PRESENT": 0, "ABSENT": 0, "LEAVE": 0, "NOT_MARKED": 0}
+
+
+def test_employee_cannot_access_attendance_lookup_or_ask_ai_for_attendance():
+    response = client_for(Role.EMPLOYEE).get("/api/ai/attendance?attendance_date=2026-10-13")
+    assert response.status_code == 403
+
+    response = client_for(Role.EMPLOYEE).post("/api/ai/chat", json={"message": "How many employees were present yesterday?"})
+    assert response.status_code == 403
+
+
+def test_authorised_ai_attendance_question_passes_only_lookup_data_to_formatter(monkeypatch):
+    lookup = {"attendance_date": "2026-10-13", "records": [], "counts": {"PRESENT": 0, "ABSENT": 0, "LEAVE": 0, "NOT_MARKED": 0}, "total_active_staff": 0}
+    captured = {}
+
+    monkeypatch.setattr(main, "read_attendance_lookup", lambda attendance_date: lookup)
+
+    async def fake_chat(chat, attendance_lookup=None):
+        captured["lookup"] = attendance_lookup
+        captured["history"] = chat.history
+        return "There were no active staff records for 13 October 2026."
+
+    monkeypatch.setattr(main, "chat_with_ollama", fake_chat)
+    response = client_for(Role.MANAGER).post("/api/ai/chat", json={"message": "Give me the attendance for 13/10/2026"})
+
+    assert response.status_code == 200
+    assert captured["lookup"] == lookup
+    assert captured["history"] == []
+    assert response.json()["attendance"] == lookup
+
+
 def test_owner_can_create_fuel_record(monkeypatch):
     cursor = FakeCursor()
     monkeypatch.setattr(main, "get_db_connection", lambda: FakeConnection(cursor))

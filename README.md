@@ -29,6 +29,7 @@ The application is under active development. This release documents the function
 | Database | MySQL via `mysql-connector-python` |
 | Authentication | Argon2 password hashing (`pwdlib`) and JWT (`PyJWT`) |
 | Testing | pytest, FastAPI TestClient |
+| Local AI guidance | Ollama (`qwen2.5:3b`) through the FastAPI backend |
 
 ## Architecture
 
@@ -109,6 +110,15 @@ notepad .env
 ```
 
 Set valid local MySQL credentials and a unique `JWT_SECRET` of at least 32 characters. The `INITIAL_OWNER_*` values are used only when creating the first Owner account.
+
+To enable the AI Assistant, install and start Ollama locally, then download its required model:
+
+```powershell
+ollama pull qwen2.5:3b
+ollama serve
+```
+
+The backend uses `http://localhost:11434` by default. Set `OLLAMA_API_URL` in `backend/.env` only when Ollama is running at another local address.
 
 The Owner can set the station city and manually record local Petrol and Diesel reference rates in Settings. These reference rates are informational only and never overwrite saved inventory prices or historical records.
 
@@ -206,6 +216,8 @@ The Owner can edit their own name, username, email, and password. The normal acc
 - `GET|PUT /api/attendance`
 - `GET|POST /api/fuels`, `PUT /api/fuels/{fuel_id}`
 - `GET|POST /api/inventory/deliveries`
+- `POST /api/ai/chat` (authenticated guidance; Owner/Manager attendance lookup is read-only)
+- `GET /api/ai/attendance?attendance_date=YYYY-MM-DD` (Owner/Manager-only, parameterized read-only lookup)
 - `GET /api/test-db`
 
 ## Testing
@@ -228,7 +240,13 @@ Build the frontend production bundle from `frontend/`:
 npm run build
 ```
 
-The current automated tests cover authentication/permissions, configuration, initial Owner setup, and fuel/user authorization. Attendance and tanker delivery workflows should be exercised manually through the running application until dedicated tests are added.
+The current automated tests cover authentication/permissions, configuration, initial Owner setup, fuel/user authorization, and AI attendance date/access/counting behaviour. Attendance and tanker delivery workflows should still be exercised manually through the running application.
+
+### AI Assistant test
+
+After signing in, open **AI Assistant** in the sidebar. Any active Owner, Manager, or Employee can ask a general question such as “What should I check before accepting a tanker delivery?” Owners and Managers can additionally ask “Give me the attendance for 13/10/2026” or “How many employees were present yesterday?”
+
+Attendance dates must be `DD/MM/YYYY`, `YYYY-MM-DD`, `today`, or `yesterday`. A date without a year triggers a clarification; Tech-E20 does not guess the year. The attendance lookup uses the existing active Manager/Employee attendance view: an absent `attendance` row is displayed and counted as **Not Marked**, never as Absent. Only the date-specific names, assigned shifts, statuses, and aggregate counts from that authorized lookup are sent to local Ollama for wording. No passwords, JWTs, unrelated records, or database access are provided to the model. Employees receive a backend `403` for attendance lookup requests.
 
 ## Security notes
 
@@ -249,6 +267,7 @@ The following items are intentionally incomplete in this release:
 - Reports, CSV export, audit-history viewer, and printable operational reports.
 - WebAuthn/passkey attendance evaluation and implementation.
 - Dedicated automated tests for attendance, tanker delivery, and the remaining operational modules.
+- The AI Assistant requires a separately running local Ollama service with `qwen2.5:3b` already pulled. Its only live-data capability is the Owner/Manager-authorized, date-specific attendance lookup; it cannot modify records or access other station data.
 
 ## Author
 

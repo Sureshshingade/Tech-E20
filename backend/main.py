@@ -1,9 +1,12 @@
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 import json
+import os
+import re
 
 from fastapi import Depends, FastAPI, Header, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
+import httpx
 import mysql.connector
 from pydantic import BaseModel, Field, field_validator
 
@@ -202,6 +205,141 @@ class NozzleInput(DispenserInput):
     fuel_id: int = Field(gt=0)
 
 
+class AiHistoryMessage(BaseModel):
+    """A small, text-only subset of the browser's current chat session."""
+
+    role: str = Field(pattern="^(user|assistant)$")
+    content: str = Field(min_length=1, max_length=2000)
+
+    @field_validator("content")
+    @classmethod
+    def clean_content(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Message content cannot be blank.")
+        return value
+
+
+class AiChatInput(BaseModel):
+    message: str = Field(min_length=1, max_length=2000)
+    history: list[AiHistoryMessage] = Field(default_factory=list, max_length=12)
+
+    @field_validator("message")
+    @classmethod
+    def clean_message(cls, value: str) -> str:
+        return AiHistoryMessage.clean_content(value)
+
+
+AI_SYSTEM_PROMPT = """You are the Tech-E20 AI Assistant for a fuel station management system.
+Provide concise, practical, general guidance about safe fuel-station operations, inventory practices,
+tanker receipt checks, shift handovers, attendance processes, customer service, and record keeping.
+When the application provides an APPROVED ATTENDANCE LOOKUP block, use only those exact records and
+counts to answer the user's attendance question. Do not invent attendance data or claim access to any
+other Tech-E20 data. You never receive credentials, JWTs, passwords, or unrestricted database access.
+Do not execute or suggest executing SQL, change records, manage staff, make privileged decisions, or
+take any action in the application. For safety, legal, financial, or emergency matters, recommend
+following local rules and the station's documented procedures."""
+
+
+ATTENDANCE_KEYWORDS = re.compile(r"\b(attendance|present|absent|leave|not[ -]?marked)\b", re.IGNORECASE)
+ISO_DATE_PATTERN = re.compile(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b")
+DAY_MONTH_YEAR_PATTERN = re.compile(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b")
+DAY_MONTH_PATTERN = re.compile(r"\b\d{1,2}/\d{1,2}(?!/\d)\b")
+
+
+def parse_attendance_question_date(message: str, today: date | None = None) -> tuple[date | None, str | None]:
+    """Parse only documented unambiguous attendance date forms from a question."""
+    normalized = message.lower()
+    if re.search(r"\byesterday\b", normalized):
+        today = today or datetime.now(timezone(timedelta(hours=5, minutes=30))).date()
+        return today.fromordinal(today.toordinal() - 1), None
+    if re.search(r"\btoday\b", normalized):
+        today = today or datetime.now(timezone(timedelta(hours=5, minutes=30))).date()
+        return today, None
+    match = ISO_DATE_PATTERN.search(message)
+    if match:
+        parts = match.groups()
+        try:
+            return date(int(parts[0]), int(parts[1]), int(parts[2])), None
+        except ValueError:
+            return None, "That ISO date is not valid. Use YYYY-MM-DD or DD/MM/YYYY."
+    match = DAY_MONTH_YEAR_PATTERN.search(message)
+    if match:
+        parts = match.groups()
+        try:
+            return date(int(parts[2]), int(parts[1]), int(parts[0])), None
+        except ValueError:
+            return None, "That date is not valid. Use DD/MM/YYYY, for example 13/10/2026."
+    if DAY_MONTH_PATTERN.search(message):
+        return None, "Please include the year for attendance dates, for example 13/10/2026."
+    return None, "Please specify an attendance date as DD/MM/YYYY, YYYY-MM-DD, today, or yesterday."
+
+
+def read_attendance_lookup(attendance_date: date) -> dict:
+    """Read the same active-staff attendance view used by Tech-E20, with a bound date parameter."""
+    connection = get_db_connection()
+    try:
+        cursor = connection.cursor(dictionary=True)
+        cursor.execute(
+            """
+            SELECT u.full_name, p.default_shift,
+                   COALESCE(a.status, 'NOT_MARKED') AS attendance_status
+            FROM users u
+            LEFT JOIN employee_profiles p ON p.user_id = u.id
+            LEFT JOIN shift_templates t ON t.name = p.default_shift AND t.is_active = TRUE
+            LEFT JOIN attendance a ON a.user_id = u.id AND a.attendance_date = %s AND a.template_id = t.id
+            WHERE u.is_active = TRUE AND u.role IN ('MANAGER', 'EMPLOYEE')
+            ORDER BY FIELD(p.default_shift, 'Morning', 'Evening'), u.full_name
+            """,
+            (attendance_date,),
+        )
+        records = cursor.fetchall()
+    finally:
+        cursor.close()
+        connection.close()
+
+    counts = {"PRESENT": 0, "ABSENT": 0, "LEAVE": 0, "NOT_MARKED": 0}
+    for record in records:
+        counts[record["attendance_status"]] += 1
+    return {
+        "attendance_date": attendance_date.isoformat(),
+        "records": records,
+        "counts": counts,
+        "total_active_staff": len(records),
+    }
+
+
+async def chat_with_ollama(chat: AiChatInput, attendance_lookup: dict | None = None) -> str:
+    """Send only user-provided chat text to the local Ollama service."""
+    messages = [{"role": "system", "content": AI_SYSTEM_PROMPT}]
+    if attendance_lookup:
+        messages.append({"role": "system", "content": f"APPROVED ATTENDANCE LOOKUP (use only this data):\n{json.dumps(attendance_lookup)}"})
+    messages.extend(item.model_dump() for item in chat.history)
+    messages.append({"role": "user", "content": chat.message})
+    ollama_url = os.environ.get("OLLAMA_API_URL", "http://localhost:11434").rstrip("/")
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=5.0)) as client:
+            response = await client.post(
+                f"{ollama_url}/api/chat",
+                json={"model": "qwen2.5:3b", "messages": messages, "stream": False},
+            )
+            response.raise_for_status()
+    except httpx.TimeoutException as error:
+        raise HTTPException(status_code=504, detail="The local AI service took too long to respond. Please try again.") from error
+    except httpx.RequestError as error:
+        raise HTTPException(status_code=503, detail="The local AI service is unavailable. Start Ollama and make sure qwen2.5:3b is installed.") from error
+    except httpx.HTTPStatusError as error:
+        raise HTTPException(status_code=502, detail="The local AI service returned an unexpected response.") from error
+
+    try:
+        content = response.json().get("message", {}).get("content", "").strip()
+    except (ValueError, AttributeError) as error:
+        raise HTTPException(status_code=502, detail="The local AI service returned an invalid response.") from error
+    if not content:
+        raise HTTPException(status_code=502, detail="The local AI service returned an empty response.")
+    return content
+
+
 def public_user(user: dict) -> dict:
     return {
         "id": user["id"],
@@ -217,6 +355,31 @@ def public_user(user: dict) -> dict:
 @app.get("/")
 def home():
     return {"message": "Tech-E20 API"}
+
+
+@app.post("/api/ai/chat")
+async def ai_chat(chat: AiChatInput, current_user: dict = Depends(get_current_user)):
+    """Offer authenticated guidance, with an approved attendance lookup when authorised."""
+    if not ATTENDANCE_KEYWORDS.search(chat.message):
+        return {"message": await chat_with_ollama(chat)}
+    if current_user["role"] not in (Role.OWNER, Role.MANAGER):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only Owners and Managers may view station attendance.")
+    attendance_date, date_error = parse_attendance_question_date(chat.message)
+    if date_error:
+        return {"message": date_error, "requires_attendance_date": True}
+    attendance_lookup = read_attendance_lookup(attendance_date)
+    return {
+        # Do not carry prior session messages into a live-data request: the model gets
+        # only the current question and this single, authorized attendance result.
+        "message": await chat_with_ollama(AiChatInput(message=chat.message), attendance_lookup),
+        "attendance": attendance_lookup,
+    }
+
+
+@app.get("/api/ai/attendance")
+def ai_attendance_lookup(attendance_date: date, current_user: dict = Depends(require_roles(Role.OWNER, Role.MANAGER))):
+    """Dedicated read-only, parameterized attendance lookup for approved AI use."""
+    return read_attendance_lookup(attendance_date)
 
 
 @app.get("/api/test-db")
